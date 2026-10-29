@@ -436,6 +436,13 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True,
     model = params.get('model')
     if 'model' in params and (not isinstance(model, str) or not model.strip()):
         _refuse('model', 'must be a non-empty string')
+    if not (isinstance(model, str) and model.strip()):
+        # A policy stored without a model is unrestorable — restore_policy() rejects it on
+        # every restart (#146478), bricking the HERMES_HOME behind a misleading
+        # storage_unavailable. Fall back to the profile's configured model so a create
+        # without an explicit model still mints a restorable policy whenever the config
+        # names one; with none in the config either, the stored value stays as before.
+        model = profile_target(present_sections(config))[0] or model
     cwd = params.get('cwd', str(resolve_agent_cwd()))
     if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
         _refuse('cwd', 'must be an absolute path to an existing directory')

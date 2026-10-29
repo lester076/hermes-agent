@@ -519,3 +519,50 @@ def test_verbose_is_a_frozen_launch_option(tmp_path):
     assert build_policy(dict(cwd=str(tmp_path)), {}).verbose is False
     with pytest.raises(RuntimeStoreError, match='invalid_params'):
         build_policy(dict(cwd=str(tmp_path), verbose='yes'), {})
+
+
+def test_build_policy_falls_back_to_the_configured_model(tmp_path):
+    """#146478: session.create stored None whenever the create request carried no model and the
+    profile config had one all along; the minted policy then failed restore_policy() on every
+    restart behind a misleading storage_unavailable. The config's model now fills the policy."""
+    import json
+    from gateway.session_policy import build_policy, restore_policy
+
+    # No model in the create params: the profile's configured model fills the policy.
+    policy = build_policy({'source': 'cli', 'cwd': str(tmp_path)}, {'model': {'default': 'gpt-5.2'}})
+    assert policy.model == 'gpt-5.2'
+
+    # Explicit params model keeps winning over the config default.
+    policy = build_policy({'source': 'cli', 'cwd': str(tmp_path), 'model': 'mimo-v2.6-flash'},
+                          {'model': {'default': 'gpt-5.2'}})
+    assert policy.model == 'mimo-v2.6-flash'
+
+    # A scalar `model: <id>` config (a form every classic loader accepts) resolves the same way.
+    policy = build_policy({'source': 'cli', 'cwd': str(tmp_path)}, {'model': 'deepseek-r2'})
+    assert policy.model == 'deepseek-r2'
+
+    # With no model anywhere the stored value is unchanged (None as before), and the restore
+    # side keeps rejecting such a policy: pin that the minted-with-model policy restores fine
+    # while a null-model one is invalid, so the fallback is what keeps sessions restorable.
+    receipt = json.loads(json.dumps({
+        'source': 'cli', 'platform': 'cli', 'cwd': str(tmp_path), 'model': None,
+        'toolsets': [], 'safe_mode': False, 'ignore_user_config': False, 'skills_prompt': None,
+        'coding_posture': False, 'client_env_json': None, 'client_env_remote': False,
+        'client_env_rules_json': None, 'edit_approval_policy': 'ask',
+        'config_json': '{}', 'request_json': '{}', 'terminal_json': '{}',
+    }))
+    from hermes_state_runtime import RuntimeStoreError
+    with pytest.raises(RuntimeStoreError):
+        restore_policy(receipt)
+
+
+def test_build_policy_without_model_anywhere_keeps_previous_behavior(tmp_path):
+    """#146478: with no model in the params and none in the config, the stored value stays as
+    before (None) — the fix only adds the config fallback, it does not change the no-model
+    path's storage shape."""
+    from gateway.session_policy import build_policy
+
+    policy = build_policy({'source': 'cli', 'cwd': str(tmp_path)}, {})
+    assert policy.model is None
+
+
