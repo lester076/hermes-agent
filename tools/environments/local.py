@@ -1025,13 +1025,44 @@ def _kill_known_pids(proc, descendants) -> None:
             target.kill()
 
 
+def _kill_descendant_windows(proc) -> int:
+    """Identity-checked kill of every still-alive descendant of ``proc`` (#146856).
+
+    The wrapper's fingerprint cannot vouch for its children — each descendant's identity
+    is verified against ITS OWN start time, read at kill time from the still-live process,
+    so a recycled PID is still refused while a live orphan is not spared. Returns the
+    number of descendants terminated (0 when none were found)."""
+    terminated = 0
+    try:
+        import psutil  # type: ignore
+        children = psutil.Process(proc.pid).children(recursive=True)
+    except Exception:  # health: allow BLE001 -- the kill path is best-effort by contract: an enumeration miss must not block the wrapper kill or the caller's cleanup
+        children = []
+    for child in children:
+        try:
+            if child.is_running():
+                child.kill()
+                terminated += 1
+        except Exception:  # health: allow BLE001 -- a child dying between enumeration and kill is expected (#146856); the next layer still runs
+            continue
+    return terminated
+
+
 def _kill_process_windows(proc) -> None:
-    """Identity-checked terminate (start time guards against PID reuse), else kill."""
+    """Identity-checked terminate (start time guards against PID reuse), else kill.
+
+    ``terminate_pid`` is fail-closed on a missing/changed wrapper fingerprint — without a
+    compensating layer that refusal left every timed-out/cancelled command's actual subtree
+    alive (#146856): the except arm killed the already-dead wrapper while the grandchildren
+    (sleeps, servers holding ports) survived. The fallback now enumerates the wrapper's
+    still-living descendants and terminates each by its own live identity."""
     try:
         from gateway.status import get_process_start_time, terminate_pid
         terminate_pid(proc.pid, force=True, expected_start_time=get_process_start_time(proc.pid))
     except Exception:
-        proc.kill()
+        with contextlib.suppress(Exception):
+            proc.kill()
+        _kill_descendant_windows(proc)
     with contextlib.suppress(subprocess.TimeoutExpired, OSError):
         proc.wait(timeout=2.0)
 
