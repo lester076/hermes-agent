@@ -2134,23 +2134,6 @@ class DiscordAdapter(DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThread
         self._pending_text_batches.clear()
         await super().cancel_background_tasks()
 
-    def _text_batch_flush_deadline_seconds(self) -> float:
-        """Deadline for flushing pending text batches during shutdown: strictly below the gateway's
-        per-adapter disconnect budget so its outer ``wait_for`` can't cancel the flush first."""
-        budget = 5.0  # mirrors gateway _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT
-        raw = os.getenv("HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "").strip()
-        if raw:
-            try:
-                parsed = float(raw)
-                if parsed > 0:
-                    budget = parsed
-            except ValueError:
-                pass
-        # Reserve ~20% (min 0.5s) headroom, hard-capped at 90% so the floor can't exceed the budget.
-        headroom = max(0.5, budget * 0.2)
-        deadline = max(1.0, budget - headroom)
-        return min(deadline, budget * 0.9)
-
     async def disconnect(self) -> None:
         """Disconnect from Discord."""
         self._disconnecting = True

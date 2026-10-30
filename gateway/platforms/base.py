@@ -4695,6 +4695,29 @@ class BasePlatformAdapter(ABC):
                                "releasing tracking and letting them unwind in the background",
                                self.name, sum(not t.done() for t in tasks))
                 break
+        # Text-batch debounce (#146858): a batch waiting out its merge window parks its flush
+        # task in _pending_text_batch_tasks, which the buckets below never owned. Let the
+        # pending flushes run out (same shape as the Discord override: cancelling mid-send
+        # dropped replies), bounded by the same deadline; then spool whatever is still buffered
+        # like _pending_messages — on Matrix the cursor already advanced past it, so an
+        # unflushed batch is a message lost for good.
+        pending = list(self._pending_text_batch_tasks.values())
+        if pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=self._text_batch_flush_deadline_seconds(),
+                )
+            except TimeoutError:
+                logger.warning("[%s] Text-batch flush timed out; cancelling remaining batch tasks",
+                               self.name)
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+        self._pending_text_batch_tasks.clear()
+        with contextlib.suppress(Exception):  # spool batches the flush window did not drain
+            from gateway.shutdown_flush import flush_pending_to_file
+            flush_pending_to_file(self._pending_text_batches, reason="adapter_shutdown")
         with contextlib.suppress(Exception):  # flush pending messages to disk before clearing
             from gateway.shutdown_flush import flush_pending_to_file
             flush_pending_to_file(self._pending_messages, reason="adapter_shutdown")
@@ -4702,8 +4725,25 @@ class BasePlatformAdapter(ABC):
             state.cancel_timer()
         for bucket in (self._background_tasks, self._expected_cancelled_tasks, self._session_tasks,
                        self._pending_messages, self._active_sessions, self._requeue_counts,
-                       self._text_debounce_store()):
+                       self._text_debounce_store(), self._pending_text_batches):
             bucket.clear()
+
+    def _text_batch_flush_deadline_seconds(self) -> float:
+        """Deadline for flushing pending text batches during shutdown: strictly below the gateway's
+        per-adapter disconnect budget so its outer ``wait_for`` can't cancel the flush first."""
+        budget = 5.0  # mirrors gateway _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT
+        raw = os.getenv("HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "").strip()
+        if raw:
+            try:
+                parsed = float(raw)
+                if parsed > 0:
+                    budget = parsed
+            except ValueError:
+                pass
+        # Reserve ~20% (min 0.5s) headroom, hard-capped at 90% so the floor can't exceed the budget.
+        headroom = max(0.5, budget * 0.2)
+        deadline = max(1.0, budget - headroom)
+        return min(deadline, budget * 0.9)
 
     def has_pending_interrupt(self, session_key: str) -> bool:
         """Check if there's a pending interrupt for a session."""
